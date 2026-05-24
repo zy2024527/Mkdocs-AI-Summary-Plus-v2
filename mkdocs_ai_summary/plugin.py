@@ -40,65 +40,60 @@ class AISummaryPlugin(BasePlugin):
         ('ci_fallback', config_options.Type(bool, default=True)),
         
         # 文件夹和排除规则
-        ('enabled_folders', config_options.Type(list, default=['blog/'])), # 启用的文件夹
+        ('enabled_folders', config_options.Type(list, default=[])), # 启用的文件夹（空列表=自动发现）
         ('exclude_patterns', config_options.Type(list, default=['tag.md'])), # 排除标签页
         ('exclude_files', config_options.Type(list, default=['blog/index.md'])), # 排除博客首页
         
         # 语言配置
         ('summary_language', config_options.Choice(['zh', 'en', 'both'], default='zh')),
         
+        # 内容处理配置
+        ('max_content_length', config_options.Type(int, default=2000)),
+
         # 调试配置
         ('debug', config_options.Type(bool, default=False)),
-        
+
         # 缓存清理配置
         ('clear_cache', config_options.Type(bool, default=False)),
     )
     
     def _discover_docs_structure(self, config: MkDocsConfig) -> List[str]:
         """动态发现 docs 文件夹结构
-        
+
         Args:
             config: MkDocs配置对象
-            
+
         Returns:
-            List[str]: 发现的文件夹路径列表
+            List[str]: 发现的文件夹路径列表（相对于docs_dir）
         """
         import os
-        
+
         docs_dir = config.get('docs_dir', 'docs')
         discovered_folders = set()
-        
-        # 确保 docs 目录存在
+
         if not os.path.exists(docs_dir):
-            return ['docs/']
-        
-        # 首先添加 docs 根目录
-        docs_path = docs_dir.replace('\\', '/') + '/'
-        discovered_folders.add(docs_path)
-        
-        # 遍历 docs 目录，查找所有子文件夹
+            return ['']
+
+        discovered_folders.add('')
+
         for root, dirs, files in os.walk(docs_dir):
-            # 获取相对于项目根目录的路径
-            rel_root = os.path.relpath(root, '.')
-            
-            # 添加当前文件夹路径（如果不是根目录）
-            if rel_root != docs_dir and rel_root != '.':
-                folder_path = rel_root.replace('\\', '/') + '/'
-                discovered_folders.add(folder_path)
-            
-            # 检查是否有 markdown 文件，如果有则确保父文件夹被包含
+            rel_root = os.path.relpath(root, docs_dir)
+            if rel_root == '.':
+                continue
+
+            folder_path = rel_root.replace('\\', '/') + '/'
+            discovered_folders.add(folder_path)
+
             has_md_files = any(file.endswith('.md') for file in files)
             if has_md_files:
                 current_folder = rel_root.replace('\\', '/') + '/'
                 discovered_folders.add(current_folder)
-        
-        # 转换为列表并排序
+
         result = sorted(list(discovered_folders))
-        
-        # 如果没有发现任何内容，返回默认的 docs/
+
         if not result:
-            result = ['docs/']
-        
+            result = ['']
+
         return result
     
     def on_config(self, config: MkDocsConfig) -> MkDocsConfig:
@@ -154,6 +149,7 @@ class AISummaryPlugin(BasePlugin):
         discovered_docs_structure = self._discover_docs_structure(config)
         
         # 初始化内容处理器
+        docs_dir = config.get('docs_dir', 'docs')
         self.content_processor = ContentProcessor(
             enabled_folders=self.config['enabled_folders'],
             exclude_patterns=self.config['exclude_patterns'],
@@ -161,7 +157,9 @@ class AISummaryPlugin(BasePlugin):
             summary_language=self.config['summary_language'],
             debug=self.config['debug'],
             default_enabled_folders=discovered_docs_structure,
-            default_exclude_patterns=['tag.md']
+            default_exclude_patterns=['tag.md'],
+            max_content_length=self.config['max_content_length'],
+            docs_dir=docs_dir,
         )
         
         # 检查服务配置变更

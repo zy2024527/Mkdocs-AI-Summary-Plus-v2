@@ -5,6 +5,7 @@
 
 import re
 import hashlib
+import fnmatch
 import yaml
 from typing import List, Optional
 from mkdocs.structure.pages import Page
@@ -13,11 +14,12 @@ from mkdocs.structure.pages import Page
 class ContentProcessor:
     """内容处理器"""
     
-    def __init__(self, enabled_folders: List[str], exclude_patterns: List[str], 
+    def __init__(self, enabled_folders: List[str], exclude_patterns: List[str],
                  exclude_files: List[str], summary_language: str, debug: bool = False,
-                 default_enabled_folders: List[str] = None, default_exclude_patterns: List[str] = None):
+                 default_enabled_folders: List[str] = None, default_exclude_patterns: List[str] = None,
+                 max_content_length: int = 2000, docs_dir: str = 'docs'):
         """初始化内容处理器
-        
+
         Args:
             enabled_folders: 启用摘要的文件夹列表
             exclude_patterns: 排除模式列表
@@ -26,31 +28,36 @@ class ContentProcessor:
             debug: 是否启用调试模式
             default_enabled_folders: 默认启用文件夹列表
             default_exclude_patterns: 默认排除模式列表
+            max_content_length: AI处理的最大内容长度
+            docs_dir: 文档目录路径
         """
         # 首先设置基本属性
         self.exclude_files = exclude_files
         self.summary_language = summary_language
         self.debug = debug
-        
+        self.max_content_length = max_content_length
+        self.docs_dir = docs_dir
+
         # 设置默认值
-        self.default_enabled_folders = default_enabled_folders or ['docs/']
+        self.default_enabled_folders = default_enabled_folders or ['']
         self.default_exclude_patterns = default_exclude_patterns or ['tag.md']
-        
+
         # 应用优先级逻辑：用户配置覆盖默认配置
-        self.enabled_folders = self._apply_user_config_priority(
+        raw_enabled_folders = self._apply_user_config_priority(
             enabled_folders, self.default_enabled_folders
         )
+        self.enabled_folders = self._normalize_enabled_folders(raw_enabled_folders)
         self.exclude_patterns = self._apply_user_config_priority(
             exclude_patterns, self.default_exclude_patterns
         )
         
         if self.debug:
             # 显示配置信息
-            if self.enabled_folders == self.default_enabled_folders:
-                print(f"📁 启用文件夹 (自动发现): {self.enabled_folders}")
-            else:
+            if raw_enabled_folders:
                 print(f"📁 启用文件夹 (用户配置): {self.enabled_folders}")
-            
+            else:
+                print(f"📁 启用文件夹 (自动发现): {self.enabled_folders}")
+
             if self.exclude_patterns == self.default_exclude_patterns:
                 print(f"🚫 排除模式 (默认): {self.exclude_patterns}")
             else:
@@ -59,11 +66,11 @@ class ContentProcessor:
     
     def _apply_user_config_priority(self, user_config: List[str], default_config: List[str]) -> List[str]:
         """应用用户配置优先级逻辑
-        
+
         Args:
             user_config: 用户配置的列表
             default_config: 默认配置的列表
-            
+
         Returns:
             List[str]: 最终使用的配置列表
         """
@@ -72,6 +79,36 @@ class ContentProcessor:
             return user_config
         # 只有当用户配置为空列表或未配置时，才使用默认配置
         return default_config
+
+    def _normalize_enabled_folders(self, folders: List[str]) -> List[str]:
+        """标准化enabled_folders路径，统一为相对于docs_dir的路径
+
+        Args:
+            folders: 原始enabled_folders列表（可能是docs_dir名称、绝对路径、或相对路径）
+
+        Returns:
+            List[str]: 标准化后的路径列表
+        """
+        docs_dir_norm = self.docs_dir.replace('\\', '/').rstrip('/')
+        docs_prefix = docs_dir_norm + '/'
+        docs_name = docs_dir_norm.split('/')[-1]  # 纯粹的docs目录名
+
+        normalized = []
+        for folder in folders:
+            f = folder.replace('\\', '/').rstrip('/')
+            if not f:
+                normalized.append('')
+                continue
+            # 路径以完整docs_dir开头，去掉前缀
+            if f == docs_dir_norm or f.startswith(docs_prefix):
+                f = f[len(docs_prefix):] if f != docs_dir_norm else ''
+            # 路径以docs目录名开头（如 docs/计算机/...）
+            elif f == docs_name:
+                f = ''
+            elif f.startswith(docs_name + '/'):
+                f = f[len(docs_name) + 1:]
+            normalized.append(f)
+        return normalized
     
     def should_generate_summary(self, page: Page) -> bool:
         """判断是否应该为页面生成摘要
@@ -90,14 +127,14 @@ class ContentProcessor:
         
         # 检查排除模式
         for pattern in self.exclude_patterns:
-            if pattern in file_path:
+            if pattern in file_path or fnmatch.fnmatch(file_path, pattern):
                 return False
         
         # 检查启用文件夹
         for folder in self.enabled_folders:
-            if file_path.startswith(folder):
+            if folder == '' or file_path.startswith(folder):
                 return True
-        
+
         return False
     
     def parse_front_matter(self, markdown: str) -> tuple[Optional[dict], str]:
@@ -242,17 +279,20 @@ class ContentProcessor:
             'openai': '🤖',
             'gemini': '✨',
             'glm': '⚡',
+            'siliconflow': '💡',
+            'qwen': '💡',
             'fallback': '📝'
         }
-        
-        icon = service_icons.get(service, '🤖')
-        
+
+        icon = service_icons.get(service.lower(), '💡')
+
         if language == 'zh':
             title = f"{icon} AI摘要 ({service.upper()})"
         else:
             title = f"{icon} AI Summary ({service.upper()})"
-        
-        return f'!!! abstract "{title}"\n\n    {summary}\n'
+
+        indented = '\n'.join(f'    {line}' for line in summary.split('\n'))
+        return f'!!! abstract "{title}"\n{indented}\n'
     
     def inject_summary(self, markdown: str, summary: str) -> str:
         """将摘要注入到markdown内容中
@@ -347,24 +387,27 @@ class ContentProcessor:
         
         return True
     
-    def truncate_content(self, content: str, max_length: int = 2000) -> str:
+    def truncate_content(self, content: str, max_length: int = None) -> str:
         """截断内容到指定长度
-        
+
         Args:
             content: 原始内容
-            max_length: 最大长度
-            
+            max_length: 最大长度，默认使用配置的max_content_length
+
         Returns:
             str: 截断后的内容
         """
+        if max_length is None:
+            max_length = self.max_content_length
+
         if len(content) <= max_length:
             return content
-        
+
         # 尝试在句号处截断
         truncated = content[:max_length]
         last_period = truncated.rfind('。')
         if last_period > max_length * 0.8:  # 如果句号位置合理
             return truncated[:last_period + 1]
-        
+
         # 否则直接截断并添加省略号
         return truncated + '...'
